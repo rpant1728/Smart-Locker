@@ -49,6 +49,10 @@ uint8_t counterBuzzer;
 uint8_t counterLight;
 bool lockerState;
 bool flapState;
+bool breakIn;
+bool flapFail;
+bool flapIR;
+bool deadline;
 
 // Creating instances of Keypad and Servo motor
 Keypad customKeypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS); 
@@ -56,16 +60,16 @@ Servo servoFlap, servoDoor;
 
 // Waits for connection of Bluetooth
 bool detectBleBaudRate(){
-  Serial.println("Detecting BLE baud rate:");
+  ////Serial.println("Detecting BLE baud rate:");
   while(1){
-    Serial.write("Checking 9600");
+    ////Serial.write("Checking 9600");
     Serial1.begin(9600);
     Serial1.write("AT");
     Serial1.flush();
     delay(50);
     String response = Serial1.readString();
     if(response == "OK"){
-      Serial.println("Detected");
+      //Serial.println("Detected");
       return true;
     } 
     else{
@@ -110,17 +114,20 @@ int getDifference(uint8_t dt1d, uint8_t dt1m, uint16_t dt1y, uint8_t dt2d, uint8
 void setup() {
   Wire.begin();
   TSL2561.init();
-  Serial.begin(9600);                      // Starts the serial communication
+  
+  // Starts the serial communication
+  Serial.begin(9600);                      
   
   // Initializes instances of Servo motors
   servoFlap.attach(13);
   servoFlap.write(0);
+  digitalWrite(46, LOW);
   servoDoor.attach(11);
   servoDoor.write(120);
   
   // Sets the modes of various pins of the Arduino as Input or Output
-  pinMode(trigPin, OUTPUT);              
-  pinMode(echoPin, INPUT);                
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);  
   pinMode(buzzerTrigger, OUTPUT); 
   pinMode(lightOff, OUTPUT); 
   
@@ -129,10 +136,7 @@ void setup() {
   digitalWrite(lightOff, HIGH);
   
   // Checks Bluetooth Connection
-  if (detectBleBaudRate())
-    Serial.write("Ready, type AT commands\n\n");
-  else
-    Serial.write("Not ready. Halt");
+  detectBleBaudRate();
   
   // Various variables initialized
   counterIR = 0;
@@ -140,35 +144,65 @@ void setup() {
   counterLight = 0;
   lockerState = false;
   flapState = true;
-  password = "1111";
+  flapIR = true;
+  password = "11";
   temp = "";
   dTime = -1;
   initTime = 0;
+  breakIn = true;
+  flapFail = true;
+  deadline = false;
 }
 
 void loop() {
   // In case of break in, activate alarm
   if(lockerState && digitalRead(42)==0){
     digitalWrite(buzzerTrigger, HIGH);
+    if(breakIn){
+      Serial.write("Someone is breaking into the locker!\n");
+      breakIn = false;
+    }
   }
-
+  
+  if(((flapIR && digitalRead(34)==1) ||(!flapIR && digitalRead(34)==0)) && !deadline){
+    if(flapFail){
+      Serial.write("Flap failure!\n");
+      flapFail = false;
+    }
+  }
+  
   // Close door if lockerState is found to be false
   if(!lockerState){
     if(digitalRead(42) == 1){
       servoDoor.write(0);
-      flapState = true;
-      lockerState = true;
+      delay(1000);
+      if(digitalRead(36) == 1){
+        Serial.write("Door locked successfully!\n");
+        flapState = true;
+        lockerState = true;
+      }else{
+        servoDoor.write(120);
+        delay(1000);
+        lockerState = false;
+        Serial.write("Door closed incorrectly!\n");
+        digitalWrite(buzzerTrigger, HIGH);
+        delay(500);
+        digitalWrite(buzzerTrigger, LOW);
+      }
     }
   }
-
+  
   // If deadline time reached, activate alarm and close flap
-  if(dTime <= millis()){
-    Serial.println("LOCKDOWN");
+  if(dTime <= millis() && flapState){
+    Serial.write("Deadline time reached. Flap closed!\n");
     digitalWrite(buzzerTrigger, HIGH);
     delay(500);
     digitalWrite(buzzerTrigger, LOW);
     servoFlap.write(120);
+    delay(1000);
+    digitalWrite(46, HIGH);
     flapState = false;
+    deadline = true;
     dTime = -1;
   }
 
@@ -177,28 +211,35 @@ void loop() {
   if(customKey){
     // If enter key pressed
     if(customKey=='*'){
-      Serial.println(temp);
+      //Serial.println(temp);
       // If incorrect password entered, activate alarm
       if(password!=temp){
         digitalWrite(buzzerTrigger, HIGH);
         delay(500);
         digitalWrite(buzzerTrigger, LOW);
-        Serial.println("Invalid Password");
+        //Serial.println("Invalid Password");
+        Serial.write("Invalid password entered!\n");
       }
       // Else open both door and flap
       else{
-        Serial.println(temp);
+        //Serial.println(temp);
         servoDoor.write(120);
         servoFlap.write(0);
+        
+        digitalWrite(46, LOW);
         delay(1000);
         flapState = true;
         lockerState = false;
         digitalWrite(buzzerTrigger, LOW);
+        breakIn = true;
+        flapFail = true;
+        deadline = false;
+        Serial.write("Door opened!\n");
       }
       temp = "";
     }
     else temp += customKey;
-    Serial.println(customKey);
+    //Serial.println(customKey);
   }
 
   // If locker is open
@@ -268,17 +309,28 @@ void loop() {
     }
     // If obstacle detected closer than permissible limit for a considerable amount of time, close flap as locker is full
     if(counterIR > 50){
-      servoFlap.write(120);
+      if(flapIR){
+        servoFlap.write(120);
+        flapIR = false;
+        delay(1000);
+        Serial.write("Locker is full!\n");
+      }
+      digitalWrite(46, HIGH);
     }
     else{
-      servoFlap.write(0);
+      if(!flapIR){
+        servoFlap.write(0);
+        delay(1000);
+        flapIR = true;
+      }
+      digitalWrite(46, LOW);
     }
   }
   
-  // If Bluetooth connection eneabled
+  // If Bluetooth connection enabled
   if(Serial1.available()){
-    Serial.write("ble: ");
-    // Read serial input from device connected via Blurttoth
+    //Serial.write("ble: ");
+    // Read serial input from device connected via Bluetooth
     String str = Serial1.readString();
     // Convert String to a character array
     char input[str.length()+2];
@@ -286,28 +338,34 @@ void loop() {
     input[str.length()+1] = 0;
     // Split input until the first empty space
     char *command = strtok(input," ");
-    Serial.println(command);
+    //Serial.println(command);
     String com(command);
     // If open command entered
     if(com == "open"){
       // Split string further to extract password from the command
       command = strtok(0, " ");
-      Serial.println(command);
+      //Serial.println(command);
       String com1(command);
       // If password is correct, open door and flap
       if(com1 == password){
         servoDoor.write(120);
         servoFlap.write(0);
+        flapFail = true;
+        digitalWrite(46, LOW);
         delay(1000);
+        breakIn = true;
         lockerState = false;
         flapState = true;
+        deadline = false;
+        Serial.write("Door opened!\n");
       }
       // If password is incorrect, activate alarm
       else{
         digitalWrite(buzzerTrigger, HIGH);
         delay(500);
         digitalWrite(buzzerTrigger, LOW);
-        Serial.println("Invalid Password");
+        Serial.write("Invalid password entered!\n");
+        ////Serial.println("Invalid Password");
       }
     }
     // If command to change password is entered
@@ -322,14 +380,15 @@ void loop() {
         String com2(command);
         // Set the password to new password
         password = com2;
-        Serial.println("changed");
+        Serial.write("Password changed successfully!\n");
+        //Serial.println("changed");
       }
       // If incorrect password is entered, activate alarm
       else{
         digitalWrite(buzzerTrigger, HIGH);
         delay(500);
         digitalWrite(buzzerTrigger, LOW);
-        Serial.println("Invalid Password");  
+        Serial.write("Invalid password entered!\n");  
       }
     }
     // If command to calibrate Arduino is entered
@@ -337,7 +396,7 @@ void loop() {
       // Split string further to obtain current password
       command = strtok(0, " ");
       String com1(command);
-      Serial.println("Calibrating..");
+      //Serial.println("Calibrating..");
       // If password is correct
       if(com1 == password){
         // Split the string further to parse the day, month, year, hour and minute values
@@ -358,13 +417,15 @@ void loop() {
         initYear = com2;
         // Set variable to mark a reference starting time
         initTime = millis();
+        Serial.write("Locker calibrated successfully!\n");
       }
       // If incorrect password entered, activate alarm
       else{
         digitalWrite(buzzerTrigger, HIGH);
         delay(500);
         digitalWrite(buzzerTrigger, LOW);
-        Serial.println("Invalid Password");
+        ////Serial.println("Invalid Password");
+        Serial.write("Invalid password entered!\n");
       }
     }
     // If command to implement deadline entered
@@ -372,7 +433,7 @@ void loop() {
       // Split string further to obtain current password
       command = strtok(0, " ");
       String com1(command);
-      Serial.println("Calibrating..");
+      //Serial.println("Calibrating..");
       // If password is correct
       if(com1 == password){
         // Split the string further to parse the day, month, year, hour and minute values
@@ -394,16 +455,16 @@ void loop() {
         // Set deadline time to initial reference time added to the difference between the deadline and the starting times
         dTime = initTime + getDifference(initDay.toInt(), initMonth.toInt(), initYear.toInt(), dDay.toInt(), dMonth.toInt(), dYear.toInt())
                 + (dHour.toInt() - initHour.toInt())*60*60*1000 + (dMinute.toInt() - initMinute.toInt())*60*1000;
+        Serial.write("Deadline set successfully!\n");
       }
       // If incorrect password entered, activate alarm
       else{
         digitalWrite(buzzerTrigger, HIGH);
         delay(500);
         digitalWrite(buzzerTrigger, LOW);
-        Serial.println("Invalid Password");
+        //Serial.println("Invalid Password");
+        Serial.write("Invalid password entered!\n");
       }
     }
-    Serial.write('\n');
-    Serial.print(str + "\n");
   }
 }
